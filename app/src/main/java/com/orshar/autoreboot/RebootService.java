@@ -4,6 +4,7 @@ import android.app.*;
 import android.app.admin.*;
 import android.content.*;
 import android.os.*;
+import android.provider.Settings;
 import android.util.Log;
 import androidx.core.app.NotificationCompat;
 import java.util.Calendar;
@@ -13,6 +14,9 @@ public class RebootService extends Service {
     private static final String TAG = "RebootService";
     private static final String CHANNEL_ID = "RebootChannel";
     private static final int NOTIF_ID = 1;
+
+    // שרתי NTP פנימיים של OrShar
+    private static final String[] NTP_SERVERS = {"100.1.1.101", "100.1.1.102"};
 
     private ScheduledExecutorService scheduler;
     private SharedPreferences prefs;
@@ -27,11 +31,15 @@ public class RebootService extends Service {
         adminComponent = new ComponentName(this, AdminReceiver.class);
         createNotificationChannel();
         startForeground(NOTIF_ID, buildNotification());
+
+        syncTimeFromNtp();   // סנכרון בעת עליית השירות
         startScheduler();
     }
 
     private void startScheduler() {
         scheduler = Executors.newSingleThreadScheduledExecutor();
+
+        // בדיקת שעת אתחול כל דקה
         scheduler.scheduleAtFixedRate(() -> {
             Calendar now = Calendar.getInstance();
             int h = now.get(Calendar.HOUR_OF_DAY);
@@ -42,6 +50,36 @@ public class RebootService extends Service {
                 doReboot();
             }
         }, 0, 1, TimeUnit.MINUTES);
+
+        // סנכרון NTP כל 6 שעות
+        scheduler.scheduleAtFixedRate(this::syncTimeFromNtp, 6, 6, TimeUnit.HOURS);
+    }
+
+    private void syncTimeFromNtp() {
+        new Thread(() -> {
+            if (!dpm.isDeviceOwnerApp(getPackageName())) {
+                Log.w(TAG, "Not device owner — NTP sync skipped");
+                return;
+            }
+            SntpClient client = new SntpClient();
+            for (String server : NTP_SERVERS) {
+                if (client.requestTime(server, 5000)) {
+                    long ntpTime = client.getNtpTime();
+                    try {
+                        // כיבוי זמן אוטומטי כדי ש-setTime יעבוד
+                        dpm.setGlobalSetting(adminComponent, Settings.Global.AUTO_TIME, "0");
+                        dpm.setTime(adminComponent, ntpTime);
+                        Log.i(TAG, "Time synced from " + server);
+                    } catch (Exception e) {
+                        Log.e(TAG, "setTime failed", e);
+                    }
+                    return; // הצליח — לא ממשיכים לשרת הבא
+                } else {
+                    Log.w(TAG, "NTP server unreachable: " + server);
+                }
+            }
+            Log.e(TAG, "All NTP servers failed");
+        }).start();
     }
 
     private void doReboot() {
@@ -50,7 +88,6 @@ public class RebootService extends Service {
             if (dpm.isDeviceOwnerApp(getPackageName())) {
                 dpm.reboot(adminComponent);
             } else {
-                Log.w(TAG, "Not device owner — reboot skipped");
                 showError("לא מוגדר כ-Device Owner");
             }
         } catch (Exception e) {
@@ -74,7 +111,7 @@ public class RebootService extends Service {
         String time = String.format("%02d:%02d", h, m);
         return new NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("OrShar AutoReboot פעיל")
-            .setContentText("אתחול יומי מתוזמן ל-" + time)
+            .setContentText("אתחול ב-" + time + " | סנכרון NTP פעיל")
             .setSmallIcon(android.R.drawable.ic_lock_power_off)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
